@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import android.media.projection.MediaProjectionManager
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -25,10 +26,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var localAI: LocalAIEngine
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
+
     private val imagePicker = 4102
     private val modelPicker = 4103
+    private val screenCaptureRequest = 4104
 
     private var modelReady = false
+
+    private val projectionManager by lazy {
+        getSystemService(MEDIA_PROJECTION_SERVICE)
+            as MediaProjectionManager
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,6 +64,10 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.floating).setOnClickListener {
             showFloatingResult()
+        }
+
+        findViewById<Button>(R.id.startCapture).setOnClickListener {
+            requestScreenCapture()
         }
     }
 
@@ -106,6 +118,11 @@ class MainActivity : AppCompatActivity() {
         startActivityForResult(intent, imagePicker)
     }
 
+    private fun requestScreenCapture() {
+        val intent = projectionManager.createScreenCaptureIntent()
+        startActivityForResult(intent, screenCaptureRequest)
+    }
+
     @Deprecated("Legacy result API")
     override fun onActivityResult(
         requestCode: Int,
@@ -114,13 +131,48 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (resultCode != Activity.RESULT_OK) return
-
-        val uri = data?.data ?: return
-
         when (requestCode) {
-            imagePicker -> processImage(uri)
-            modelPicker -> copyAndLoadModel(uri)
+            imagePicker -> {
+                if (resultCode == Activity.RESULT_OK) {
+                    data?.data?.let { processImage(it) }
+                }
+            }
+
+            modelPicker -> {
+                if (resultCode == Activity.RESULT_OK) {
+                    data?.data?.let { copyAndLoadModel(it) }
+                }
+            }
+
+            screenCaptureRequest -> {
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    val serviceIntent = Intent(
+                        this,
+                        ScreenCaptureService::class.java
+                    ).apply {
+                        putExtra("resultCode", resultCode)
+                        putExtra("projectionData", data)
+                    }
+
+                    if (android.os.Build.VERSION.SDK_INT >= 26) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+
+                    Toast.makeText(
+                        this,
+                        "Izin Screen Capture diberikan.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Izin Screen Capture dibatalkan.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
         }
     }
 
@@ -134,7 +186,6 @@ class MainActivity : AppCompatActivity() {
                 .getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
                 .process(image)
                 .addOnSuccessListener { visionText ->
-
                     val extractedText = visionText.text.trim()
 
                     if (extractedText.isEmpty()) {
