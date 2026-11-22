@@ -27,7 +27,7 @@ class LocalAIEngine(context: Context) {
         onComplete: (Result<Unit>) -> Unit
     ) {
         executor.execute {
-            val outcome = runCatching {
+            val outcome: Result<Unit> = runCatching {
                 require(modelFile.exists()) {
                     "File model tidak ditemukan."
                 }
@@ -52,8 +52,6 @@ class LocalAIEngine(context: Context) {
                                     Bantu memahami soal pilihan ganda.
                                     Jelaskan alasan jawaban secara singkat.
                                     Gunakan bahasa Indonesia.
-                                    Jika informasi soal kurang jelas,
-                                    minta pengguna memeriksanya.
                                     """.trimIndent()
                                 )
                             )
@@ -63,7 +61,9 @@ class LocalAIEngine(context: Context) {
                     conversation = newConversation
 
                 } catch (error: Throwable) {
-                    runCatching { newEngine.close() }
+                    runCatching<Unit> {
+                        newEngine.close()
+                    }
                     throw error
                 }
             }
@@ -79,10 +79,9 @@ class LocalAIEngine(context: Context) {
         onComplete: (Result<String>) -> Unit
     ) {
         executor.execute {
-            val outcome = runCatching {
+            val outcome: Result<String> = runCatching {
                 val activeConversation =
-                    conversation
-                        ?: error("Model AI belum dimuat.")
+                    conversation ?: error("Model AI belum dimuat.")
 
                 val response = activeConversation.sendMessage(
                     """
@@ -97,7 +96,7 @@ class LocalAIEngine(context: Context) {
                     """.trimIndent()
                 )
 
-                response.text
+                response.contents.toString()
             }
 
             mainHandler.post {
@@ -108,14 +107,17 @@ class LocalAIEngine(context: Context) {
 
     fun close() {
         executor.execute {
-            runCatching { conversation?.close() }
+            runCatching<Unit> {
+                conversation?.close()
+            }
             conversation = null
 
-            runCatching { engine?.close() }
+            runCatching<Unit> {
+                engine?.close()
+            }
             engine = null
         }
 
         executor.shutdown()
     }
 }
-
