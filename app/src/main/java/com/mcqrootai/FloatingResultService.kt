@@ -66,7 +66,9 @@ class FloatingResultService : Service() {
             this.text = "  ✕  "
             setTextColor(Color.WHITE)
             textSize = 18f
-            setOnClickListener { stopSelf() }
+            setOnClickListener {
+                stopSelf()
+            }
         }
 
         header.addView(
@@ -85,10 +87,16 @@ class FloatingResultService : Service() {
             setBackgroundColor(Color.rgb(35, 120, 75))
 
             setOnClickListener {
-                resultText?.text = "Mengambil layar dan membaca soal..."
+                resultText?.text =
+                    "Mengambil layar dan membaca soal..."
 
-                sendBroadcast(
-                    Intent(ACTION_CAPTURE).setPackage(packageName)
+                startService(
+                    Intent(
+                        this@FloatingResultService,
+                        ScreenCaptureService::class.java
+                    ).apply {
+                        action = ScreenCaptureService.ACTION_CAPTURE
+                    }
                 )
             }
         }
@@ -102,7 +110,13 @@ class FloatingResultService : Service() {
         }
 
         val scroll = ScrollView(this).apply {
-            addView(resultText)
+            addView(
+                resultText,
+                ScrollView.LayoutParams(
+                    -1,
+                    -2
+                )
+            )
         }
 
         floatingView = LinearLayout(this).apply {
@@ -145,6 +159,7 @@ class FloatingResultService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     params?.x =
                         initialX + (event.rawX - initialTouchX).toInt()
+
                     params?.y =
                         initialY + (event.rawY - initialTouchY).toInt()
 
@@ -155,6 +170,7 @@ class FloatingResultService : Service() {
                         )
                     } catch (_: Exception) {
                     }
+
                     true
                 }
 
