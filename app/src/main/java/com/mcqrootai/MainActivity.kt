@@ -25,7 +25,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var localAI: LocalAIEngine
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
-
     private val imagePicker = 4102
     private val modelPicker = 4103
 
@@ -72,19 +71,16 @@ class MainActivity : AppCompatActivity() {
                 val output = process.inputStream
                     .bufferedReader().use { it.readText() }
 
-                process.waitFor() == 0 &&
-                    output.contains("uid=0")
+                process.waitFor() == 0 && output.contains("uid=0")
             } catch (e: Exception) {
                 false
             }
 
             runOnUiThread {
-                if (hasRoot) {
-                    engineStatus.text =
-                        "KERNELSU: ROOT TERSEDIA | AI: BELUM DIMUAT"
+                engineStatus.text = if (hasRoot) {
+                    "KERNELSU: ROOT TERSEDIA | AI: BELUM DIMUAT"
                 } else {
-                    engineStatus.text =
-                        "KERNELSU: ROOT TIDAK TERSEDIA | AI: BELUM DIMUAT"
+                    "KERNELSU: ROOT TIDAK TERSEDIA | AI: BELUM DIMUAT"
                 }
             }
         }
@@ -130,34 +126,38 @@ class MainActivity : AppCompatActivity() {
 
     private fun processImage(uri: Uri) {
         try {
+            result.text = "OCR sedang membaca gambar..."
+
             val image = InputImage.fromFilePath(this, uri)
 
             TextRecognition
                 .getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
                 .process(image)
                 .addOnSuccessListener { visionText ->
-                    question.setText(visionText.text)
 
-                    Toast.makeText(
-                        this,
-                        "OCR berhasil membaca teks.",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    val extractedText = visionText.text.trim()
+
+                    if (extractedText.isEmpty()) {
+                        result.text = "Tidak ada teks yang terbaca."
+                        return@addOnSuccessListener
+                    }
+
+                    question.setText(extractedText)
+
+                    if (!modelReady) {
+                        result.text =
+                            "OCR berhasil. Muat model Gemma untuk analisis."
+                        return@addOnSuccessListener
+                    }
+
+                    analyzeText(extractedText)
                 }
-                .addOnFailureListener {
-                    Toast.makeText(
-                        this,
-                        "OCR gagal: ${it.localizedMessage}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                .addOnFailureListener { error ->
+                    result.text = "OCR gagal: ${error.localizedMessage}"
                 }
 
         } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                "Gagal membuka gambar: ${e.localizedMessage}",
-                Toast.LENGTH_LONG
-            ).show()
+            result.text = "Gagal membuka gambar: ${e.localizedMessage}"
         }
     }
 
@@ -165,10 +165,7 @@ class MainActivity : AppCompatActivity() {
         engineStatus.text = "AI: MENYALIN FILE MODEL..."
 
         ioExecutor.execute {
-            val modelFile = File(
-                filesDir,
-                "gemma3-1b.litertlm"
-            )
+            val modelFile = File(filesDir, "gemma3-1b.litertlm")
 
             val copyResult = runCatching {
                 contentResolver.openInputStream(uri).use { input ->
@@ -210,7 +207,6 @@ class MainActivity : AppCompatActivity() {
                                     modelReady = false
                                     engineStatus.text =
                                         "AI: GAGAL MEMUAT MODEL"
-
                                     result.text =
                                         "Gagal memuat model: ${error.localizedMessage}"
                                 }
@@ -244,14 +240,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val analyzeButton = findViewById<Button>(R.id.analyze)
-        analyzeButton.isEnabled = false
+        analyzeText(promptText)
+    }
 
-        result.text = "AI sedang menganalisis..."
+    private fun analyzeText(text: String) {
+        result.text = "Gemma sedang menganalisis..."
 
-        localAI.analyze(promptText) { response ->
-            analyzeButton.isEnabled = true
-
+        localAI.analyze(text) { response ->
             response.fold(
                 onSuccess = { answer ->
                     result.text = answer
