@@ -8,9 +8,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -30,6 +32,9 @@ class ScreenCaptureService : Service() {
         const val ACTION_STOP =
             "com.mcqrootai.ACTION_STOP_CAPTURE"
 
+        const val ACTION_CAPTURE =
+            "com.mcqrootai.ACTION_CAPTURE_ONCE"
+
         const val ACTION_TEXT_DETECTED =
             "com.mcqrootai.TEXT_DETECTED"
 
@@ -37,7 +42,6 @@ class ScreenCaptureService : Service() {
 
         private const val CHANNEL_ID = "screen_capture"
         private const val NOTIFICATION_ID = 1001
-        private const val INTERVAL = 3000L
     }
 
     private var projection: MediaProjection? = null
@@ -46,8 +50,8 @@ class ScreenCaptureService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
 
+    private var captureRequested = false
     private var processing = false
-    private var lastText = ""
 
     private val recognizer by lazy {
         TextRecognition.getClient(
@@ -55,12 +59,23 @@ class ScreenCaptureService : Service() {
         )
     }
 
-    private val captureTask = object : Runnable {
-        override fun run() {
-            captureFrame()
-            handler.postDelayed(this, INTERVAL)
+    private val imageListener =
+        ImageReader.OnImageAvailableListener { reader ->
+
+            if (!captureRequested || processing) {
+                val unusedImage = reader.acquireLatestImage()
+                unusedImage?.close()
+                return@OnImageAvailableListener
+            }
+
+            val image = reader.acquireLatestImage()
+                ?: return@OnImageAvailableListener
+
+            captureRequested = false
+            processing = true
+
+            processFrame(image)
         }
-    }
 
     override fun onCreate() {
         super.onCreate()
@@ -73,9 +88,18 @@ class ScreenCaptureService : Service() {
         startId: Int
     ): Int {
 
-        if (intent?.action == ACTION_STOP) {
-            stopCapture()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopCapture()
+                return START_NOT_STICKY
+            }
+
+            ACTION_CAPTURE -> {
+                if (projection != null) {
+                    captureRequested = true
+                }
+                return START_NOT_STICKY
+            }
         }
 
         if (projection != null) {
@@ -133,17 +157,24 @@ class ScreenCaptureService : Service() {
             val height = metrics.heightPixels
             val density = metrics.densityDpi
 
-            imageReader = ImageReader.newInstance(
+            val reader = ImageReader.newInstance(
                 width,
                 height,
                 PixelFormat.RGBA_8888,
-                2
+                3
+            )
+
+            imageReader = reader
+
+            reader.setOnImageAvailableListener(
+                imageListener,
+                handler
             )
 
             projection?.registerCallback(
                 object : MediaProjection.Callback() {
                     override fun onStop() {
-                        stopCapture()
+                        finishCapture(false)
                     }
                 },
                 handler
@@ -155,12 +186,10 @@ class ScreenCaptureService : Service() {
                 height,
                 density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface,
+                reader.surface,
                 null,
                 handler
             )
-
-            handler.postDelayed(captureTask, 1000L)
 
         } catch (error: Exception) {
             stopCapture()
@@ -169,76 +198,88 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun captureFrame() {
-        if (processing) return
+    private fun processFrame(image: Image) {
+        var bitmap: Bitmap? = null
 
-        val image = try {
-            imageReader?.acquireLatestImage()
+        try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+
+            val rowPadding =
+                rowStride - pixelStride * image.width
+
+            val paddedWidth =
+                image.width + rowPadding / pixelStride
+
+            val paddedBitmap = Bitmap.createBitmap(
+                paddedWidth,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+
+            buffer.rewind()
+            paddedBitmap.copyPixelsFromBuffer(buffer)
+
+            bitmap = Bitmap.createBitmap(
+                paddedBitmap,
+                0,
+                0,
+                image.width,
+                image.height
+            )
+
+            paddedBitmap.recycle()
+
         } catch (error: Exception) {
-            null
-        } ?: return
+            sendText("Gagal membaca frame layar: ${error.message}")
+            processing = false
+        } finally {
+            image.close()
+        }
 
-        processing = true
+        val capturedBitmap = bitmap
 
-        val plane = image.planes[0]
-        val buffer = plane.buffer
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
+        if (capturedBitmap == null) {
+            return
+        }
 
-        val rowPadding =
-            rowStride - pixelStride * image.width
+        try {
+            recognizer.process(
+                InputImage.fromBitmap(capturedBitmap, 0)
+            )
+                .addOnSuccessListener { visionText ->
+                    val text = visionText.text.trim()
 
-        val paddedWidth =
-            image.width + rowPadding / pixelStride
-
-        val paddedBitmap = android.graphics.Bitmap.createBitmap(
-            paddedWidth,
-            image.height,
-            android.graphics.Bitmap.Config.ARGB_8888
-        )
-
-        buffer.rewind()
-        paddedBitmap.copyPixelsFromBuffer(buffer)
-        image.close()
-
-        val bitmap = android.graphics.Bitmap.createBitmap(
-            paddedBitmap,
-            0,
-            0,
-            imageReader!!.width,
-            imageReader!!.height
-        )
-
-        paddedBitmap.recycle()
-
-        recognizer.process(
-            InputImage.fromBitmap(bitmap, 0)
-        )
-            .addOnSuccessListener { visionText ->
-                val text = visionText.text.trim()
-
-                if (text.isNotEmpty()) {
-                    val normalized = text.replace(
-                        Regex("\\s+"),
-                        " "
-                    )
-
-                    if (normalized != lastText) {
-                        lastText = normalized
-
-                        sendBroadcast(
-                            Intent(ACTION_TEXT_DETECTED).apply {
-                                setPackage(packageName)
-                                putExtra(EXTRA_TEXT, text)
-                            }
-                        )
+                    if (text.isNotEmpty()) {
+                        sendText(text)
+                    } else {
+                        sendText("Tidak ada teks yang terbaca di layar.")
                     }
                 }
+                .addOnFailureListener { error ->
+                    sendText("OCR gagal: ${error.localizedMessage}")
+                }
+                .addOnCompleteListener {
+                    capturedBitmap.recycle()
+                    processing = false
+                }
+
+        } catch (error: Exception) {
+            capturedBitmap.recycle()
+            processing = false
+            sendText("OCR gagal: ${error.localizedMessage}")
+        }
+    }
+
+    private fun sendText(text: String) {
+        sendBroadcast(
+            Intent(ACTION_TEXT_DETECTED).apply {
+                setPackage(packageName)
+                putExtra(EXTRA_TEXT, text)
             }
-            .addOnCompleteListener {
-                bitmap.recycle()
-                processing = false
-            }
+        )
     }
 
     private fun createNotification(): Notification {
@@ -259,7 +300,7 @@ class ScreenCaptureService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("MCQ Root AI")
-            .setContentText("Screen Assistant aktif")
+            .setContentText("Screen Assistant aktif. Capture saat diminta.")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .addAction(
@@ -271,16 +312,25 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCapture() {
-        handler.removeCallbacks(captureTask)
+        finishCapture(true)
+    }
+
+    private fun finishCapture(stopProjection: Boolean) {
+        captureRequested = false
+
+        val activeProjection = projection
+        projection = null
 
         virtualDisplay?.release()
         virtualDisplay = null
 
+        imageReader?.setOnImageAvailableListener(null, null)
         imageReader?.close()
         imageReader = null
 
-        projection?.stop()
-        projection = null
+        if (stopProjection) {
+            activeProjection?.stop()
+        }
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -301,11 +351,17 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(captureTask)
+        handler.removeCallbacksAndMessages(null)
 
         virtualDisplay?.release()
+        virtualDisplay = null
+
+        imageReader?.setOnImageAvailableListener(null, null)
         imageReader?.close()
+        imageReader = null
+
         projection?.stop()
+        projection = null
 
         recognizer.close()
 
