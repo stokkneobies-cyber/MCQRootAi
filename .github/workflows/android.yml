@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -23,13 +23,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: |
-          mkdir -p "$ANDROID_HOME/licenses"
-          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" > "$ANDROID_HOME/licenses/android-sdk-license"
-          sdkmanager --licenses </dev/null || true
+      - name: Accept SDK licenses
+        run: sdkmanager --licenses </dev/null
 
-      - name: Install Android SDK
+      - name: Install SDK packages
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
