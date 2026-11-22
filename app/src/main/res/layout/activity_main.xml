@@ -20,7 +20,7 @@
             android:layout_height="wrap_content"/>
 
         <TextView
-            android:text="Asisten belajar pilihan ganda • Manual + Screenshot OCR"
+            android:text="Asisten belajar pilihan ganda • AI lokal"
             android:textColor="#BDBDBD"
             android:layout_marginTop="5dp"
             android:layout_width="match_parent"
@@ -28,16 +28,23 @@
 
         <TextView
             android:id="@+id/engineStatus"
-            android:text="MESIN AI: LOKAL • TANPA API BERBAYAR"
+            android:text="MESIN AI: BELUM DIMUAT"
             android:textColor="#80CBC4"
             android:textStyle="bold"
             android:layout_marginTop="20dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
 
+        <Button
+            android:id="@+id/loadModel"
+            android:text="PILIH DAN MUAT MODEL GEMMA 3 1B"
+            android:layout_marginTop="12dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"/>
+
         <EditText
             android:id="@+id/question"
-            android:hint="Ketik soal latihan dan pilihan A, B, C, D di sini..."
+            android:hint="Ketik soal latihan dan pilihan A, B, C, D..."
             android:gravity="top|start"
             android:minLines="7"
             android:padding="12dp"
@@ -50,21 +57,21 @@
 
         <Button
             android:id="@+id/pickImage"
-            android:text="Pilih Screenshot Soal"
+            android:text="PILIH SCREENSHOT SOAL"
             android:layout_marginTop="12dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
 
         <Button
             android:id="@+id/analyze"
-            android:text="Analisis Jawaban"
+            android:text="ANALISIS JAWABAN"
             android:layout_marginTop="8dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
 
         <Button
             android:id="@+id/floating"
-            android:text="Tampilkan Hasil Mengambang"
+            android:text="TAMPILKAN HASIL MENGAMBANG"
             android:layout_marginTop="8dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
