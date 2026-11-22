@@ -1,4 +1,5 @@
 
+<?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -57,7 +58,7 @@
 
         <Button
             android:id="@+id/pickImage"
-            android:text="PILIH SCREENSHOT SOAL"
+            android:text="PILIH GAMBAR SOAL"
             android:layout_marginTop="12dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
@@ -72,6 +73,13 @@
         <Button
             android:id="@+id/floating"
             android:text="TAMPILKAN HASIL MENGAMBANG"
+            android:layout_marginTop="8dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"/>
+
+        <Button
+            android:id="@+id/startCapture"
+            android:text="MULAI SCREEN CAPTURE"
             android:layout_marginTop="8dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
