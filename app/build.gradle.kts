@@ -31,12 +31,12 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
 
-    // Pertahankan sementara karena MainActivity lama masih memakainya
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-    // OCR
+    // OCR screenshot
     implementation("com.google.mlkit:text-recognition:16.0.1")
 
-    // AI lokal
-    implementation("com.google.mediapipe:tasks-genai:0.10.27")
+    // Mesin AI lokal LiteRT-LM
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
+
+    // OkHttp dipertahankan sementara
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
