@@ -2,34 +2,107 @@
 package com.mcqrootai
 
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.PixelFormat
-import android.graphics.Color
-import android.graphics.Typeface
+import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
-import android.view.WindowManager
 import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.ScrollView
+import android.widget.TextView
+import androidx.core.content.ContextCompat
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class FloatingResultService : Service() {
 
     companion object {
-        const val ACTION_UPDATE =
+        const val ACTION_UPDATE_RESULT =
             "com.mcqrootai.ACTION_UPDATE_RESULT"
 
-        const val ACTION_CAPTURE =
-            "com.mcqrootai.ACTION_CAPTURE_FROM_FLOATING"
-
         const val EXTRA_RESULT = "result"
+
+        private const val MODEL_NAME = "gemini-3-flash-preview"
+        private const val PREF_NAME = "mcq_settings"
+        private const val PREF_API_KEY = "gemini_api_key"
     }
 
-    private var windowManager: WindowManager? = null
+    private lateinit var windowManager: WindowManager
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val executor = Executors.newSingleThreadExecutor()
+
     private var floatingView: LinearLayout? = null
     private var resultText: TextView? = null
-    private var params: WindowManager.LayoutParams? = null
+    private var captureButton: Button? = null
+
+    private var overlayVisible = false
+    private var isAnalyzing = false
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private val ocrReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ScreenCaptureService.ACTION_TEXT_DETECTED) {
+                return
+            }
+
+            val detectedText = intent.getStringExtra(
+                ScreenCaptureService.EXTRA_TEXT
+            ).orEmpty()
+
+            showOverlay()
+
+            if (detectedText.isBlank()) {
+                updateResult("Tidak ada teks soal yang terbaca. Coba lagi.")
+                return
+            }
+
+            updateResult("Soal berhasil dibaca.\nGemini sedang menganalisis...")
+            analyzeWithGemini(detectedText)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        val filter = IntentFilter(
+            ScreenCaptureService.ACTION_TEXT_DETECTED
+        )
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.registerReceiver(
+                this,
+                ocrReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            registerReceiver(ocrReceiver, filter)
+        }
+
+        createFloatingWindow()
+    }
 
     override fun onStartCommand(
         intent: Intent?,
@@ -37,35 +110,43 @@ class FloatingResultService : Service() {
         startId: Int
     ): Int {
 
-        val text = intent?.getStringExtra(EXTRA_RESULT)
-            ?: "Siap. Tekan BERI JAWABAN untuk menganalisis layar."
-
-        if (floatingView != null) {
-            resultText?.text = text
-            return START_NOT_STICKY
+        if (floatingView == null) {
+            createFloatingWindow()
         }
 
-        windowManager =
-            getSystemService(WINDOW_SERVICE) as WindowManager
+        val updatedResult = intent?.getStringExtra(EXTRA_RESULT)
+
+        if (!updatedResult.isNullOrBlank()) {
+            showOverlay()
+            updateResult(updatedResult)
+        }
+
+        return START_NOT_STICKY
+    }
+
+    private fun createFloatingWindow() {
+        if (floatingView != null) return
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(18, 14, 18, 14)
+            setBackgroundColor(0xFF202124.toInt())
+        }
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(16, 12, 12, 12)
-            setBackgroundColor(Color.rgb(35, 90, 180))
         }
 
         val title = TextView(this).apply {
-            this.text = "MCQ ROOT AI"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
+            text = "MCQ ROOT AI"
+            textSize = 16f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(4, 8, 8, 8)
         }
 
-        val close = TextView(this).apply {
-            this.text = "  ✕  "
-            setTextColor(Color.WHITE)
-            textSize = 18f
+        val closeButton = Button(this).apply {
+            text = "TUTUP"
             setOnClickListener {
                 stopSelf()
             }
@@ -75,129 +156,310 @@ class FloatingResultService : Service() {
             title,
             LinearLayout.LayoutParams(0, -2, 1f)
         )
-        header.addView(close)
 
-        val captureButton = TextView(this).apply {
+        header.addView(
+            closeButton,
+            LinearLayout.LayoutParams(-2, -2)
+        )
+
+        captureButton = Button(this).apply {
             text = "BERI JAWABAN"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(12, 16, 12, 16)
-            setBackgroundColor(Color.rgb(35, 120, 75))
-
+            textSize = 14f
             setOnClickListener {
-                resultText?.text =
-                    "Mengambil layar dan membaca soal..."
-
-                startService(
-                    Intent(
-                        this@FloatingResultService,
-                        ScreenCaptureService::class.java
-                    ).apply {
-                        action = ScreenCaptureService.ACTION_CAPTURE
-                    }
-                )
+                captureAndAnalyze()
             }
         }
 
+        val scrollView = ScrollView(this)
+
         resultText = TextView(this).apply {
-            this.text = text
-            setTextColor(Color.WHITE)
+            text = "Tekan BERI JAWABAN untuk membaca soal di layar."
             textSize = 14f
-            setPadding(16, 16, 16, 16)
-            setTextIsSelectable(true)
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(8, 12, 8, 12)
         }
 
-        val scroll = ScrollView(this).apply {
-            addView(
-                resultText,
-                ScrollView.LayoutParams(
-                    -1,
-                    -2
-                )
-            )
-        }
+        scrollView.addView(resultText)
 
-        floatingView = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(37, 37, 37))
-            addView(header)
-            addView(captureButton)
-            addView(
-                scroll,
-                LinearLayout.LayoutParams(-1, 0, 1f)
-            )
-        }
+        container.addView(header)
+        container.addView(
+            captureButton,
+            LinearLayout.LayoutParams(-1, -2)
+        )
+        container.addView(
+            scrollView,
+            LinearLayout.LayoutParams(-1, 280)
+        )
 
-        params = WindowManager.LayoutParams(
-            (resources.displayMetrics.widthPixels * 0.85).toInt(),
-            380,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        floatingView = container
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            },
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            x = 0
             y = 100
         }
 
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
+        container.setOnTouchListener(object : View.OnTouchListener {
+            private var initialX = 0
+            private var initialY = 0
+            private var initialTouchX = 0f
+            private var initialTouchY = 0f
 
-        header.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params?.x ?: 0
-                    initialY = params?.y ?: 0
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    params?.x =
-                        initialX + (event.rawX - initialTouchX).toInt()
-
-                    params?.y =
-                        initialY + (event.rawY - initialTouchY).toInt()
-
-                    try {
-                        windowManager?.updateViewLayout(
-                            floatingView,
-                            params
-                        )
-                    } catch (_: Exception) {
+            override fun onTouch(
+                view: View,
+                event: MotionEvent
+            ): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = params.x
+                        initialY = params.y
+                        initialTouchX = event.rawX
+                        initialTouchY = event.rawY
+                        return true
                     }
 
-                    true
-                }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x =
+                            initialX + (event.rawX - initialTouchX).toInt()
 
-                else -> false
+                        params.y =
+                            initialY + (event.rawY - initialTouchY).toInt()
+
+                        if (overlayVisible) {
+                            windowManager.updateViewLayout(
+                                container,
+                                params
+                            )
+                        }
+                        return true
+                    }
+                }
+                return false
             }
+        })
+
+        showOverlay()
+    }
+
+    private fun showOverlay() {
+        val view = floatingView ?: return
+        if (overlayVisible) return
+
+        try {
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = 100
+            }
+
+            windowManager.addView(view, params)
+            overlayVisible = true
+        } catch (e: Exception) {
+            updateResult("Gagal menampilkan floating window: ${e.message}")
+        }
+    }
+
+    private fun hideOverlay() {
+        val view = floatingView ?: return
+        if (!overlayVisible) return
+
+        try {
+            windowManager.removeView(view)
+            overlayVisible = false
+        } catch (_: Exception) {
+            overlayVisible = false
+        }
+    }
+
+    private fun captureAndAnalyze() {
+        if (isAnalyzing) {
+            updateResult("Tunggu, soal sebelumnya masih dianalisis.")
+            return
         }
 
-        windowManager?.addView(floatingView, params)
+        updateResult("Menyiapkan pengambilan layar...")
 
-        return START_NOT_STICKY
+        // Hilangkan overlay agar tidak ikut terbaca OCR.
+        hideOverlay()
+
+        mainHandler.postDelayed({
+            try {
+                val captureIntent = Intent(
+                    this,
+                    ScreenCaptureService::class.java
+                ).apply {
+                    action = ScreenCaptureService.ACTION_CAPTURE
+                }
+
+                startService(captureIntent)
+
+            } catch (e: Exception) {
+                showOverlay()
+                updateResult(
+                    "Gagal mengambil layar: ${e.message}"
+                )
+            }
+        }, 500)
+    }
+
+    private fun analyzeWithGemini(question: String) {
+        if (isAnalyzing) return
+
+        val apiKey = getSharedPreferences(
+            PREF_NAME,
+            Context.MODE_PRIVATE
+        ).getString(PREF_API_KEY, "").orEmpty()
+
+        if (apiKey.isBlank()) {
+            updateResult(
+                "API key Gemini belum diatur. " +
+                "Buka aplikasi utama dan masukkan API key."
+            )
+            return
+        }
+
+        isAnalyzing = true
+        captureButton?.isEnabled = false
+
+        executor.execute {
+            try {
+                val prompt = """
+                    Jawab soal pilihan ganda berikut dalam bahasa Indonesia.
+
+                    Berikan:
+                    1. Jawaban yang paling tepat.
+                    2. Huruf pilihan jawaban jika tersedia.
+                    3. Penjelasan langkah demi langkah.
+                    4. Alasan singkat mengapa pilihan tersebut benar.
+
+                    Jika teks soal tidak lengkap atau tidak terbaca,
+                    jelaskan bagian yang kurang dan jangan menebak.
+
+                    SOAL:
+                    $question
+                """.trimIndent()
+
+                val parts = JSONArray().put(
+                    JSONObject().put("text", prompt)
+                )
+
+                val contents = JSONArray().put(
+                    JSONObject().put("parts", parts)
+                )
+
+                val requestJson = JSONObject()
+                    .put("contents", contents)
+
+                val body = requestJson.toString()
+                    .toRequestBody(
+                        "application/json; charset=utf-8".toMediaType()
+                    )
+
+                val url =
+                    "https://generativelanguage.googleapis.com/" +
+                    "v1beta/models/$MODEL_NAME:generateContent"
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("x-goog-api-key", apiKey)
+                    .post(body)
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+
+                    if (!response.isSuccessful) {
+                        throw Exception(
+                            "Gemini API error ${response.code}: $responseBody"
+                        )
+                    }
+
+                    val json = JSONObject(responseBody)
+
+                    val answer = json
+                        .optJSONArray("candidates")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("content")
+                        ?.optJSONArray("parts")
+                        ?.optJSONObject(0)
+                        ?.optString("text")
+                        .orEmpty()
+
+                    if (answer.isBlank()) {
+                        throw Exception(
+                            "Gemini tidak memberikan jawaban."
+                        )
+                    }
+
+                    mainHandler.post {
+                        updateResult(answer)
+                        isAnalyzing = false
+                        captureButton?.isEnabled = true
+                    }
+                }
+
+            } catch (e: Exception) {
+                mainHandler.post {
+                    updateResult(
+                        "Gagal menganalisis soal:\n${e.message}"
+                    )
+                    isAnalyzing = false
+                    captureButton?.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun updateResult(text: String) {
+        mainHandler.post {
+            resultText?.text = text
+        }
     }
 
     override fun onDestroy() {
-        floatingView?.let {
-            try {
-                windowManager?.removeView(it)
-            } catch (_: Exception) {
-            }
+        try {
+            unregisterReceiver(ocrReceiver)
+        } catch (_: Exception) {
         }
 
-        floatingView = null
-        resultText = null
-        windowManager = null
-        params = null
+        try {
+            floatingView?.let {
+                if (overlayVisible) {
+                    windowManager.removeView(it)
+                }
+            }
+        } catch (_: Exception) {
+        }
 
+        overlayVisible = false
+        floatingView = null
+
+        executor.shutdownNow()
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
+    }
 }
