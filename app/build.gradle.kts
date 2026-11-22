@@ -1,44 +1,84 @@
 
-plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-}
+package com.mcqrootai
 
-android {
-    namespace = "com.mcqrootai"
-    compileSdk = 35
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Intent
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
 
-    defaultConfig {
-        applicationId = "com.mcqrootai"
-        minSdk = 28
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+class ScreenCaptureService : Service() {
+
+    companion object {
+        const val ACTION_STOP =
+            "com.mcqrootai.ACTION_STOP_CAPTURE"
+
+        private const val CHANNEL_ID = "screen_capture"
+        private const val NOTIFICATION_ID = 1001
     }
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
     }
-}
 
-kotlin {
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int
+    ): Int {
+
+        if (intent?.action == ACTION_STOP) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val notification: Notification =
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("MCQ Root AI")
+                .setContentText(
+                    "Layanan capture siap. Menunggu izin Android."
+                )
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setOngoing(true)
+                .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo
+                    .FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        return START_NOT_STICKY
     }
-}
 
-dependencies {
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("com.google.android.material:material:1.12.0")
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Screen Capture",
+                NotificationManager.IMPORTANCE_LOW
+            )
 
-    // OCR
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+            val manager =
+                getSystemService(NotificationManager::class.java)
 
-    // AI lokal LiteRT-LM
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
+            manager.createNotificationChannel(channel)
+        }
+    }
 
-    // OkHttp
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    override fun onDestroy() {
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }
