@@ -26,13 +26,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
 
-        <EditText
-            android:id="@+id/apiKey"
-            android:hint="OpenAI API key (disimpan lokal)"
-            android:inputType="textPassword"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#888888"
-            android:backgroundTint="#6750A4"
+        <TextView
+            android:id="@+id/engineStatus"
+            android:text="MESIN AI: LOKAL • TANPA API BERBAYAR"
+            android:textColor="#80CBC4"
+            android:textStyle="bold"
             android:layout_marginTop="20dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
