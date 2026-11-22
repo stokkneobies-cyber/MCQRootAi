@@ -36,5 +36,7 @@ dependencies {
 
     implementation("com.google.mlkit:text-recognition:16.0.1")
 
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
+
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
