@@ -20,9 +20,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
 
-    kotlinOptions {
-        jvmTarget = "17"
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 
@@ -31,12 +33,12 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
 
-    // OCR screenshot
+    // OCR
     implementation("com.google.mlkit:text-recognition:16.0.1")
 
-    // Mesin AI lokal LiteRT-LM
+    // AI lokal LiteRT-LM
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
 
-    // OkHttp dipertahankan sementara
+    // OkHttp
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
