@@ -2,8 +2,12 @@
 package com.mcqrootai
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
@@ -36,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     private val imagePicker = 4102
     private val screenCaptureRequest = 4104
 
+    private var captureActive = false
+    private var lastAnalyzedText = ""
+
     private val preferences by lazy {
         getSharedPreferences("mcq_settings", MODE_PRIVATE)
     }
@@ -55,6 +62,49 @@ class MainActivity : AppCompatActivity() {
             as MediaProjectionManager
     }
 
+    private val screenTextReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ScreenCaptureService.ACTION_TEXT_DETECTED) {
+                return
+            }
+
+            val detectedText = intent.getStringExtra(
+                ScreenCaptureService.EXTRA_TEXT
+            )?.trim().orEmpty()
+
+            if (detectedText.isEmpty()) return
+
+            val hasOptions = Regex(
+                "(?im)^\\s*(A|B|C|D)[.)\\:]\\s+"
+            ).findAll(detectedText).count() >= 2
+
+            runOnUiThread {
+                question.setText(detectedText)
+
+                if (!hasOptions) {
+                    result.text =
+                        "Teks terdeteksi. Menunggu soal dan pilihan jawaban."
+                    return@runOnUiThread
+                }
+
+                if (detectedText == lastAnalyzedText) return@runOnUiThread
+
+                val key = preferences.getString(
+                    "gemini_api_key", ""
+                )
+
+                if (key.isNullOrBlank()) {
+                    result.text =
+                        "Soal terdeteksi. Atur Gemini API key terlebih dahulu."
+                    return@runOnUiThread
+                }
+
+                lastAnalyzedText = detectedText
+                analyzeText(detectedText)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -64,6 +114,21 @@ class MainActivity : AppCompatActivity() {
         engineStatus = findViewById(R.id.engineStatus)
 
         engineStatus.text = "AI: GEMINI 3 FLASH"
+
+        val screenFilter = IntentFilter(
+            ScreenCaptureService.ACTION_TEXT_DETECTED
+        )
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                screenTextReceiver,
+                screenFilter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(screenTextReceiver, screenFilter)
+        }
 
         findViewById<Button>(R.id.loadModel).apply {
             text = "ATUR GEMINI API KEY"
@@ -84,14 +149,19 @@ class MainActivity : AppCompatActivity() {
             showFloatingResult()
         }
 
-        findViewById<Button>(R.id.startCapture).setOnClickListener {
-            requestScreenCapture()
+        findViewById<Button>(R.id.startCapture).apply {
+            text = "MULAI SCREEN ASSISTANT"
+            setOnClickListener {
+                if (captureActive) {
+                    stopScreenCapture()
+                } else {
+                    requestScreenCapture()
+                }
+            }
         }
     }
 
-    private fun showApiKeyDialog(
-        textToAnalyze: String?
-    ) {
+    private fun showApiKeyDialog(textToAnalyze: String?) {
         val keyInput = EditText(this).apply {
             hint = "Masukkan Gemini API key"
             inputType = InputType.TYPE_CLASS_TEXT or
@@ -146,8 +216,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestScreenCapture() {
+        if (preferences.getString("gemini_api_key", "").isNullOrBlank()) {
+            showApiKeyDialog(null)
+            return
+        }
+
         val intent = projectionManager.createScreenCaptureIntent()
         startActivityForResult(intent, screenCaptureRequest)
+    }
+
+    private fun stopScreenCapture() {
+        val stopIntent = Intent(
+            this,
+            ScreenCaptureService::class.java
+        ).apply {
+            action = ScreenCaptureService.ACTION_STOP
+        }
+
+        startService(stopIntent)
+
+        captureActive = false
+        lastAnalyzedText = ""
+
+        findViewById<Button>(R.id.startCapture).text =
+            "MULAI SCREEN ASSISTANT"
+
+        engineStatus.text = "SCREEN ASSISTANT NONAKTIF"
+        result.text = "Screen Assistant telah dihentikan."
     }
 
     @Deprecated("Legacy result API")
@@ -175,15 +270,23 @@ class MainActivity : AppCompatActivity() {
                         putExtra("projectionData", data)
                     }
 
-                    if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    if (Build.VERSION.SDK_INT >= 26) {
                         startForegroundService(serviceIntent)
                     } else {
                         startService(serviceIntent)
                     }
 
+                    captureActive = true
+                    lastAnalyzedText = ""
+
+                    findViewById<Button>(R.id.startCapture).text =
+                        "NONAKTIFKAN SCREEN ASSISTANT"
+
+                    engineStatus.text = "SCREEN ASSISTANT AKTIF"
+
                     Toast.makeText(
                         this,
-                        "Izin Screen Capture diberikan.",
+                        "Screen Assistant aktif.",
                         Toast.LENGTH_LONG
                     ).show()
                 } else {
@@ -266,7 +369,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        result.text = "Gemini 3 Flash sedang menganalisis..."
+        runOnUiThread {
+            result.text = "Gemini 3 Flash sedang menganalisis..."
+        }
 
         ioExecutor.execute {
             val outcome = runCatching {
@@ -324,9 +429,7 @@ class MainActivity : AppCompatActivity() {
                                 .getString("message")
                         }.getOrDefault(responseBody)
 
-                        error(
-                            "HTTP ${response.code}: $errorMessage"
-                        )
+                        error("HTTP ${response.code}: $errorMessage")
                     }
 
                     val json = JSONObject(responseBody)
@@ -364,6 +467,15 @@ class MainActivity : AppCompatActivity() {
                     onSuccess = { answer ->
                         result.text = answer
                         engineStatus.text = "GEMINI 3 FLASH: TERHUBUNG"
+
+                        if (Settings.canDrawOverlays(this)) {
+                            startService(
+                                Intent(
+                                    this,
+                                    FloatingResultService::class.java
+                                ).putExtra("result", answer)
+                            )
+                        }
                     },
                     onFailure = { error ->
                         result.text =
@@ -400,6 +512,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(screenTextReceiver)
+        } catch (_: Exception) {
+        }
+
         ioExecutor.shutdown()
         super.onDestroy()
     }
