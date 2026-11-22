@@ -40,9 +40,11 @@ class FloatingResultService : Service() {
         private const val MODEL_NAME = "gemini-3-flash-preview"
         private const val PREF_NAME = "mcq_settings"
         private const val PREF_API_KEY = "gemini_api_key"
+        private const val CAPTURE_TIMEOUT = 10000L
     }
 
     private lateinit var windowManager: WindowManager
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -50,8 +52,11 @@ class FloatingResultService : Service() {
     private var resultText: TextView? = null
     private var captureButton: Button? = null
 
+    private var windowParams: WindowManager.LayoutParams? = null
+
     private var overlayVisible = false
     private var isAnalyzing = false
+    private var capturePending = false
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -59,24 +64,58 @@ class FloatingResultService : Service() {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    private val captureTimeoutRunnable = Runnable {
+        if (capturePending) {
+            capturePending = false
+            showOverlay()
+            updateResult(
+                "Pengambilan layar terlalu lama. " +
+                "Pastikan Screen Assistant aktif, lalu coba lagi."
+            )
+            updateCaptureButton()
+        }
+    }
+
     private val ocrReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != ScreenCaptureService.ACTION_TEXT_DETECTED) {
+        override fun onReceive(
+            context: Context?,
+            intent: Intent?
+        ) {
+            if (
+                intent?.action !=
+                ScreenCaptureService.ACTION_TEXT_DETECTED
+            ) {
                 return
             }
 
             val detectedText = intent.getStringExtra(
                 ScreenCaptureService.EXTRA_TEXT
-            ).orEmpty()
+            ).orEmpty().trim()
+
+            mainHandler.removeCallbacks(captureTimeoutRunnable)
+            capturePending = false
 
             showOverlay()
 
             if (detectedText.isBlank()) {
-                updateResult("Tidak ada teks soal yang terbaca. Coba lagi.")
+                updateResult(
+                    "Tidak ada teks soal yang terbaca. Coba lagi."
+                )
+                updateCaptureButton()
                 return
             }
 
-            updateResult("Soal berhasil dibaca.\nGemini sedang menganalisis...")
+            if (isStatusMessage(detectedText)) {
+                updateResult(detectedText)
+                updateCaptureButton()
+                return
+            }
+
+            updateResult(
+                "Soal berhasil dibaca.\n" +
+                "Gemini sedang menganalisis..."
+            )
+
             analyzeWithGemini(detectedText)
         }
     }
@@ -84,7 +123,8 @@ class FloatingResultService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        windowManager =
+            getSystemService(WINDOW_SERVICE) as WindowManager
 
         val filter = IntentFilter(
             ScreenCaptureService.ACTION_TEXT_DETECTED
@@ -98,6 +138,7 @@ class FloatingResultService : Service() {
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         } else {
+            @Suppress("DEPRECATION")
             registerReceiver(ocrReceiver, filter)
         }
 
@@ -182,10 +223,12 @@ class FloatingResultService : Service() {
         scrollView.addView(resultText)
 
         container.addView(header)
+
         container.addView(
             captureButton,
             LinearLayout.LayoutParams(-1, -2)
         )
+
         container.addView(
             scrollView,
             LinearLayout.LayoutParams(-1, 280)
@@ -193,15 +236,18 @@ class FloatingResultService : Service() {
 
         floatingView = container
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+        val overlayType =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
                 @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE
-            },
+            }
+
+        windowParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -210,7 +256,9 @@ class FloatingResultService : Service() {
             y = 100
         }
 
-        container.setOnTouchListener(object : View.OnTouchListener {
+        // Geser floating window melalui bagian header.
+        header.setOnTouchListener(object : View.OnTouchListener {
+
             private var initialX = 0
             private var initialY = 0
             private var initialTouchX = 0f
@@ -220,6 +268,9 @@ class FloatingResultService : Service() {
                 view: View,
                 event: MotionEvent
             ): Boolean {
+
+                val params = windowParams ?: return false
+
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         initialX = params.x
@@ -230,21 +281,30 @@ class FloatingResultService : Service() {
                     }
 
                     MotionEvent.ACTION_MOVE -> {
-                        params.x =
-                            initialX + (event.rawX - initialTouchX).toInt()
+                        params.x = initialX +
+                            (event.rawX - initialTouchX).toInt()
 
-                        params.y =
-                            initialY + (event.rawY - initialTouchY).toInt()
+                        params.y = initialY +
+                            (event.rawY - initialTouchY).toInt()
 
                         if (overlayVisible) {
-                            windowManager.updateViewLayout(
-                                container,
-                                params
-                            )
+                            try {
+                                windowManager.updateViewLayout(
+                                    container,
+                                    params
+                                )
+                            } catch (_: Exception) {
+                            }
                         }
                         return true
                     }
+
+                    MotionEvent.ACTION_UP,
+                    MotionEvent.ACTION_CANCEL -> {
+                        return true
+                    }
                 }
+
                 return false
             }
         })
@@ -254,56 +314,57 @@ class FloatingResultService : Service() {
 
     private fun showOverlay() {
         val view = floatingView ?: return
+        val params = windowParams ?: return
+
         if (overlayVisible) return
 
         try {
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_PHONE
-                },
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 100
-            }
-
             windowManager.addView(view, params)
             overlayVisible = true
         } catch (e: Exception) {
-            updateResult("Gagal menampilkan floating window: ${e.message}")
+            overlayVisible = false
+            updateResult(
+                "Gagal menampilkan floating window: ${e.message}"
+            )
         }
     }
 
     private fun hideOverlay() {
         val view = floatingView ?: return
+
         if (!overlayVisible) return
 
         try {
             windowManager.removeView(view)
-            overlayVisible = false
         } catch (_: Exception) {
-            overlayVisible = false
         }
+
+        overlayVisible = false
     }
 
     private fun captureAndAnalyze() {
+        if (capturePending) {
+            updateResult("Pengambilan layar sedang berlangsung.")
+            return
+        }
+
         if (isAnalyzing) {
             updateResult("Tunggu, soal sebelumnya masih dianalisis.")
             return
         }
 
+        capturePending = true
+        captureButton?.isEnabled = false
+
         updateResult("Menyiapkan pengambilan layar...")
 
-        // Hilangkan overlay agar tidak ikut terbaca OCR.
+        // Sembunyikan overlay agar tidak ikut terbaca OCR.
         hideOverlay()
 
         mainHandler.postDelayed({
+
+            if (!capturePending) return@postDelayed
+
             try {
                 val captureIntent = Intent(
                     this,
@@ -314,13 +375,48 @@ class FloatingResultService : Service() {
 
                 startService(captureIntent)
 
+                mainHandler.removeCallbacks(
+                    captureTimeoutRunnable
+                )
+
+                mainHandler.postDelayed(
+                    captureTimeoutRunnable,
+                    CAPTURE_TIMEOUT
+                )
+
             } catch (e: Exception) {
+                capturePending = false
                 showOverlay()
+
                 updateResult(
                     "Gagal mengambil layar: ${e.message}"
                 )
+
+                updateCaptureButton()
             }
+
         }, 500)
+    }
+
+    private fun isStatusMessage(text: String): Boolean {
+        val lowerText = text.lowercase()
+
+        val statusMessages = listOf(
+            "screen assistant aktif",
+            "screen assistant belum aktif",
+            "screen assistant dihentikan",
+            "sedang memproses",
+            "gagal membaca frame",
+            "gagal mengambil layar",
+            "screen capture gagal",
+            "ocr gagal",
+            "izin screen capture",
+            "tidak ada teks yang terbaca"
+        )
+
+        return statusMessages.any {
+            lowerText.startsWith(it)
+        }
     }
 
     private fun analyzeWithGemini(question: String) {
@@ -333,14 +429,15 @@ class FloatingResultService : Service() {
 
         if (apiKey.isBlank()) {
             updateResult(
-                "API key Gemini belum diatur. " +
+                "API key Gemini belum diatur.\n" +
                 "Buka aplikasi utama dan masukkan API key."
             )
+            updateCaptureButton()
             return
         }
 
         isAnalyzing = true
-        captureButton?.isEnabled = false
+        updateCaptureButton()
 
         executor.execute {
             try {
@@ -387,24 +484,42 @@ class FloatingResultService : Service() {
                     .build()
 
                 httpClient.newCall(request).execute().use { response ->
-                    val responseBody = response.body?.string().orEmpty()
+
+                    val responseBody =
+                        response.body?.string().orEmpty()
 
                     if (!response.isSuccessful) {
                         throw Exception(
-                            "Gemini API error ${response.code}: $responseBody"
+                            "Gemini API error ${response.code}: " +
+                            responseBody.take(1000)
                         )
                     }
 
                     val json = JSONObject(responseBody)
 
-                    val answer = json
+                    val candidateParts = json
                         .optJSONArray("candidates")
                         ?.optJSONObject(0)
                         ?.optJSONObject("content")
                         ?.optJSONArray("parts")
-                        ?.optJSONObject(0)
-                        ?.optString("text")
-                        .orEmpty()
+
+                    val answerBuilder = StringBuilder()
+
+                    if (candidateParts != null) {
+                        for (i in 0 until candidateParts.length()) {
+                            val part = candidateParts.optJSONObject(i)
+                            val text = part?.optString("text").orEmpty()
+
+                            if (text.isNotBlank()) {
+                                if (answerBuilder.isNotEmpty()) {
+                                    answerBuilder.append("\n")
+                                }
+                                answerBuilder.append(text)
+                            }
+                        }
+                    }
+
+                    val answer = answerBuilder.toString().trim()
 
                     if (answer.isBlank()) {
                         throw Exception(
@@ -415,7 +530,7 @@ class FloatingResultService : Service() {
                     mainHandler.post {
                         updateResult(answer)
                         isAnalyzing = false
-                        captureButton?.isEnabled = true
+                        updateCaptureButton()
                     }
                 }
 
@@ -424,10 +539,18 @@ class FloatingResultService : Service() {
                     updateResult(
                         "Gagal menganalisis soal:\n${e.message}"
                     )
+
                     isAnalyzing = false
-                    captureButton?.isEnabled = true
+                    updateCaptureButton()
                 }
             }
+        }
+    }
+
+    private fun updateCaptureButton() {
+        mainHandler.post {
+            captureButton?.isEnabled =
+                !capturePending && !isAnalyzing
         }
     }
 
@@ -438,24 +561,22 @@ class FloatingResultService : Service() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+
         try {
             unregisterReceiver(ocrReceiver)
         } catch (_: Exception) {
         }
 
-        try {
-            floatingView?.let {
-                if (overlayVisible) {
-                    windowManager.removeView(it)
-                }
-            }
-        } catch (_: Exception) {
-        }
+        hideOverlay()
 
-        overlayVisible = false
         floatingView = null
+        resultText = null
+        captureButton = null
+        windowParams = null
 
         executor.shutdownNow()
+
         super.onDestroy()
     }
 
