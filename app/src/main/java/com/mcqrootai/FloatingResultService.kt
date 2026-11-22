@@ -20,6 +20,9 @@ class FloatingResultService : Service() {
         const val ACTION_UPDATE =
             "com.mcqrootai.ACTION_UPDATE_RESULT"
 
+        const val ACTION_CAPTURE =
+            "com.mcqrootai.ACTION_CAPTURE_FROM_FLOATING"
+
         const val EXTRA_RESULT = "result"
     }
 
@@ -35,7 +38,7 @@ class FloatingResultService : Service() {
     ): Int {
 
         val text = intent?.getStringExtra(EXTRA_RESULT)
-            ?: "Menunggu hasil analisis..."
+            ?: "Siap. Tekan BERI JAWABAN untuk menganalisis layar."
 
         if (floatingView != null) {
             resultText?.text = text
@@ -63,9 +66,7 @@ class FloatingResultService : Service() {
             this.text = "  ✕  "
             setTextColor(Color.WHITE)
             textSize = 18f
-            setOnClickListener {
-                stopSelf()
-            }
+            setOnClickListener { stopSelf() }
         }
 
         header.addView(
@@ -73,6 +74,24 @@ class FloatingResultService : Service() {
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         header.addView(close)
+
+        val captureButton = TextView(this).apply {
+            text = "BERI JAWABAN"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(12, 16, 12, 16)
+            setBackgroundColor(Color.rgb(35, 120, 75))
+
+            setOnClickListener {
+                resultText?.text = "Mengambil layar dan membaca soal..."
+
+                sendBroadcast(
+                    Intent(ACTION_CAPTURE).setPackage(packageName)
+                )
+            }
+        }
 
         resultText = TextView(this).apply {
             this.text = text
@@ -90,6 +109,7 @@ class FloatingResultService : Service() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(37, 37, 37))
             addView(header)
+            addView(captureButton)
             addView(
                 scroll,
                 LinearLayout.LayoutParams(-1, 0, 1f)
@@ -98,7 +118,7 @@ class FloatingResultService : Service() {
 
         params = WindowManager.LayoutParams(
             (resources.displayMetrics.widthPixels * 0.85).toInt(),
-            320,
+            380,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
@@ -107,13 +127,34 @@ class FloatingResultService : Service() {
             y = 100
         }
 
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+
         header.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    initialX = params?.x ?: 0
+                    initialY = params?.y ?: 0
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
                     true
                 }
 
-                MotionEvent.ACTION_UP -> {
+                MotionEvent.ACTION_MOVE -> {
+                    params?.x =
+                        initialX + (event.rawX - initialTouchX).toInt()
+                    params?.y =
+                        initialY + (event.rawY - initialTouchY).toInt()
+
+                    try {
+                        windowManager?.updateViewLayout(
+                            floatingView,
+                            params
+                        )
+                    } catch (_: Exception) {
+                    }
                     true
                 }
 
@@ -126,15 +167,12 @@ class FloatingResultService : Service() {
         return START_NOT_STICKY
     }
 
-    fun updateResult(text: String) {
-        resultText?.post {
-            resultText?.text = text
-        }
-    }
-
     override fun onDestroy() {
         floatingView?.let {
-            windowManager?.removeView(it)
+            try {
+                windowManager?.removeView(it)
+            } catch (_: Exception) {
+            }
         }
 
         floatingView = null
