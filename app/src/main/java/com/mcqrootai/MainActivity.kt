@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     private val screenCaptureRequest = 4104
 
     private var captureActive = false
-    private var lastAnalyzedText = ""
+    private var waitingForCapture = false
 
     private val preferences by lazy {
         getSharedPreferences("mcq_settings", MODE_PRIVATE)
@@ -63,8 +63,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val screenTextReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != ScreenCaptureService.ACTION_TEXT_DETECTED) {
+
+        override fun onReceive(
+            context: Context?,
+            intent: Intent?
+        ) {
+            if (
+                intent?.action !=
+                ScreenCaptureService.ACTION_TEXT_DETECTED
+            ) {
                 return
             }
 
@@ -72,36 +79,34 @@ class MainActivity : AppCompatActivity() {
                 ScreenCaptureService.EXTRA_TEXT
             )?.trim().orEmpty()
 
-            if (detectedText.isEmpty()) return
+            waitingForCapture = false
 
-            val hasOptions = Regex(
-                "(?im)^\\s*(A|B|C|D)[.)\\:]\\s+"
-            ).findAll(detectedText).count() >= 2
-
-            runOnUiThread {
-                question.setText(detectedText)
-
-                if (!hasOptions) {
-                    result.text =
-                        "Teks terdeteksi. Menunggu soal dan pilihan jawaban."
-                    return@runOnUiThread
-                }
-
-                if (detectedText == lastAnalyzedText) return@runOnUiThread
-
-                val key = preferences.getString(
-                    "gemini_api_key", ""
-                )
-
-                if (key.isNullOrBlank()) {
-                    result.text =
-                        "Soal terdeteksi. Atur Gemini API key terlebih dahulu."
-                    return@runOnUiThread
-                }
-
-                lastAnalyzedText = detectedText
-                analyzeText(detectedText)
+            if (detectedText.isEmpty()) {
+                result.text = "Tidak ada teks yang terdeteksi."
+                return
             }
+
+            question.setText(detectedText)
+
+            if (detectedText.startsWith("Gagal membaca frame") ||
+                detectedText.startsWith("OCR gagal") ||
+                detectedText.startsWith("Tidak ada teks")
+            ) {
+                result.text = detectedText
+                return
+            }
+
+            val key = preferences.getString(
+                "gemini_api_key", ""
+            )
+
+            if (key.isNullOrBlank()) {
+                result.text = "Masukkan Gemini API key terlebih dahulu."
+                showApiKeyDialog(detectedText)
+                return
+            }
+
+            analyzeText(detectedText)
         }
     }
 
@@ -132,6 +137,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.loadModel).apply {
             text = "ATUR GEMINI API KEY"
+
             setOnClickListener {
                 showApiKeyDialog(null)
             }
@@ -145,12 +151,19 @@ class MainActivity : AppCompatActivity() {
             analyze()
         }
 
-        findViewById<Button>(R.id.floating).setOnClickListener {
-            showFloatingResult()
+        // Tombol BERi JAWABAN: ambil satu frame layar.
+        findViewById<Button>(R.id.floating).apply {
+            text = "BERI JAWABAN"
+
+            setOnClickListener {
+                requestOneCapture()
+            }
         }
 
+        // Tombol untuk mengaktifkan atau menghentikan capture.
         findViewById<Button>(R.id.startCapture).apply {
-            text = "MULAI SCREEN ASSISTANT"
+            text = "AKTIFKAN SCREEN ASSISTANT"
+
             setOnClickListener {
                 if (captureActive) {
                     stopScreenCapture()
@@ -162,11 +175,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showApiKeyDialog(textToAnalyze: String?) {
+
         val keyInput = EditText(this).apply {
             hint = "Masukkan Gemini API key"
+
             inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(preferences.getString("gemini_api_key", ""))
+
+            setText(
+                preferences.getString("gemini_api_key", "")
+            )
         }
 
         AlertDialog.Builder(this)
@@ -175,6 +193,7 @@ class MainActivity : AppCompatActivity() {
             .setView(keyInput)
             .setNegativeButton("Batal", null)
             .setPositiveButton("Simpan") { _, _ ->
+
                 val key = keyInput.text.toString().trim()
 
                 if (key.isEmpty()) {
@@ -183,6 +202,7 @@ class MainActivity : AppCompatActivity() {
                         "API key belum diisi.",
                         Toast.LENGTH_SHORT
                     ).show()
+
                     return@setPositiveButton
                 }
 
@@ -190,11 +210,12 @@ class MainActivity : AppCompatActivity() {
                     .putString("gemini_api_key", key)
                     .apply()
 
-                engineStatus.text = "GEMINI 3 FLASH: API KEY TERSIMPAN"
+                engineStatus.text =
+                    "GEMINI 3 FLASH: API KEY TERSIMPAN"
 
                 Toast.makeText(
                     this,
-                    "API key tersimpan di perangkat.",
+                    "API key tersimpan.",
                     Toast.LENGTH_SHORT
                 ).show()
 
@@ -206,7 +227,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectImage() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+
+        val intent = Intent(
+            Intent.ACTION_OPEN_DOCUMENT
+        ).apply {
             type = "image/*"
             addCategory(Intent.CATEGORY_OPENABLE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -216,16 +240,78 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestScreenCapture() {
-        if (preferences.getString("gemini_api_key", "").isNullOrBlank()) {
+
+        if (
+            preferences.getString(
+                "gemini_api_key", ""
+            ).isNullOrBlank()
+        ) {
             showApiKeyDialog(null)
             return
         }
 
-        val intent = projectionManager.createScreenCaptureIntent()
-        startActivityForResult(intent, screenCaptureRequest)
+        val intent =
+            projectionManager.createScreenCaptureIntent()
+
+        startActivityForResult(
+            intent,
+            screenCaptureRequest
+        )
+    }
+
+    private fun requestOneCapture() {
+
+        if (!captureActive) {
+            Toast.makeText(
+                this,
+                "Aktifkan Screen Assistant terlebih dahulu.",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        if (waitingForCapture) {
+            Toast.makeText(
+                this,
+                "Sedang mengambil dan membaca layar.",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        if (
+            preferences.getString(
+                "gemini_api_key", ""
+            ).isNullOrBlank()
+        ) {
+            showApiKeyDialog(null)
+            return
+        }
+
+        waitingForCapture = true
+
+        result.text = "Mengambil screenshot layar..."
+
+        val captureIntent = Intent(
+            this,
+            ScreenCaptureService::class.java
+        ).apply {
+            action = ScreenCaptureService.ACTION_CAPTURE
+        }
+
+        startService(captureIntent)
+
+        Toast.makeText(
+            this,
+            "Screenshot diminta. Menunggu OCR...",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun stopScreenCapture() {
+
         val stopIntent = Intent(
             this,
             ScreenCaptureService::class.java
@@ -236,12 +322,13 @@ class MainActivity : AppCompatActivity() {
         startService(stopIntent)
 
         captureActive = false
-        lastAnalyzedText = ""
+        waitingForCapture = false
 
         findViewById<Button>(R.id.startCapture).text =
-            "MULAI SCREEN ASSISTANT"
+            "AKTIFKAN SCREEN ASSISTANT"
 
         engineStatus.text = "SCREEN ASSISTANT NONAKTIF"
+
         result.text = "Screen Assistant telah dihentikan."
     }
 
@@ -251,17 +338,29 @@ class MainActivity : AppCompatActivity() {
         resultCode: Int,
         data: Intent?
     ) {
-        super.onActivityResult(requestCode, resultCode, data)
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
 
         when (requestCode) {
+
             imagePicker -> {
                 if (resultCode == Activity.RESULT_OK) {
-                    data?.data?.let { processImage(it) }
+                    data?.data?.let {
+                        processImage(it)
+                    }
                 }
             }
 
             screenCaptureRequest -> {
-                if (resultCode == Activity.RESULT_OK && data != null) {
+
+                if (
+                    resultCode == Activity.RESULT_OK &&
+                    data != null
+                ) {
+
                     val serviceIntent = Intent(
                         this,
                         ScreenCaptureService::class.java
@@ -277,19 +376,24 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     captureActive = true
-                    lastAnalyzedText = ""
 
-                    findViewById<Button>(R.id.startCapture).text =
-                        "NONAKTIFKAN SCREEN ASSISTANT"
+                    findViewById<Button>(
+                        R.id.startCapture
+                    ).text = "NONAKTIFKAN SCREEN ASSISTANT"
 
-                    engineStatus.text = "SCREEN ASSISTANT AKTIF"
+                    engineStatus.text =
+                        "SCREEN ASSISTANT AKTIF"
 
                     Toast.makeText(
                         this,
                         "Screen Assistant aktif.",
                         Toast.LENGTH_LONG
                     ).show()
+
                 } else {
+
+                    captureActive = false
+
                     Toast.makeText(
                         this,
                         "Izin Screen Capture dibatalkan.",
@@ -301,19 +405,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processImage(uri: Uri) {
+
         try {
             result.text = "OCR sedang membaca gambar..."
 
-            val image = InputImage.fromFilePath(this, uri)
+            val image = InputImage.fromFilePath(
+                this,
+                uri
+            )
 
             TextRecognition
-                .getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                .getClient(
+                    TextRecognizerOptions.DEFAULT_OPTIONS
+                )
                 .process(image)
                 .addOnSuccessListener { visionText ->
-                    val extractedText = visionText.text.trim()
+
+                    val extractedText =
+                        visionText.text.trim()
 
                     if (extractedText.isEmpty()) {
-                        result.text = "Tidak ada teks yang terbaca."
+                        result.text =
+                            "Tidak ada teks yang terbaca."
                         return@addOnSuccessListener
                     }
 
@@ -324,32 +437,36 @@ class MainActivity : AppCompatActivity() {
                     )
 
                     if (key.isNullOrBlank()) {
-                        result.text =
-                            "OCR berhasil. Masukkan Gemini API key untuk analisis."
                         showApiKeyDialog(extractedText)
                     } else {
                         analyzeText(extractedText)
                     }
                 }
                 .addOnFailureListener { error ->
-                    result.text = "OCR gagal: ${error.localizedMessage}"
+                    result.text =
+                        "OCR gagal: ${error.localizedMessage}"
                 }
 
-        } catch (e: Exception) {
+        } catch (error: Exception) {
             result.text =
-                "Gagal membuka gambar: ${e.localizedMessage}"
+                "Gagal membuka gambar: ${error.localizedMessage}"
         }
     }
 
     private fun analyze() {
-        val promptText = question.text.toString().trim()
+
+        val promptText =
+            question.text.toString().trim()
 
         if (promptText.isEmpty()) {
-            question.error = "Masukkan soal terlebih dahulu"
+            question.error =
+                "Masukkan soal terlebih dahulu"
             return
         }
 
-        val key = preferences.getString("gemini_api_key", "")
+        val key = preferences.getString(
+            "gemini_api_key", ""
+        )
 
         if (key.isNullOrBlank()) {
             showApiKeyDialog(promptText)
@@ -360,6 +477,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun analyzeText(text: String) {
+
         val apiKey = preferences.getString(
             "gemini_api_key", ""
         )?.trim().orEmpty()
@@ -370,11 +488,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         runOnUiThread {
-            result.text = "Gemini 3 Flash sedang menganalisis..."
+            result.text =
+                "Gemini 3 Flash sedang menganalisis..."
+
+            engineStatus.text =
+                "GEMINI 3 FLASH: MENGANALISIS"
         }
 
         ioExecutor.execute {
+
             val outcome = runCatching {
+
                 val prompt = """
                     Kamu adalah MCQ Root AI, asisten belajar
                     yang membantu memahami soal pilihan ganda.
@@ -388,7 +512,8 @@ class MainActivity : AppCompatActivity() {
                     2. Alasan jawaban tersebut benar.
                     3. Penjelasan singkat mengapa pilihan lain kurang tepat.
 
-                    Jika informasi soal tidak cukup, katakan dengan jujur.
+                    Jika informasi soal tidak cukup,
+                    katakan dengan jujur.
                 """.trimIndent()
 
                 val requestJson = JSONObject()
@@ -398,7 +523,10 @@ class MainActivity : AppCompatActivity() {
                             JSONObject().put(
                                 "parts",
                                 org.json.JSONArray().put(
-                                    JSONObject().put("text", prompt)
+                                    JSONObject().put(
+                                        "text",
+                                        prompt
+                                    )
                                 )
                             )
                         )
@@ -406,7 +534,8 @@ class MainActivity : AppCompatActivity() {
 
                 val body = requestJson.toString()
                     .toRequestBody(
-                        "application/json; charset=utf-8".toMediaType()
+                        "application/json; charset=utf-8"
+                            .toMediaType()
                     )
 
                 val request = Request.Builder()
@@ -414,61 +543,86 @@ class MainActivity : AppCompatActivity() {
                         "https://generativelanguage.googleapis.com/" +
                             "v1beta/models/$modelName:generateContent"
                     )
-                    .addHeader("x-goog-api-key", apiKey)
-                    .addHeader("Content-Type", "application/json")
+                    .addHeader(
+                        "x-goog-api-key",
+                        apiKey
+                    )
+                    .addHeader(
+                        "Content-Type",
+                        "application/json"
+                    )
                     .post(body)
                     .build()
 
-                httpClient.newCall(request).execute().use { response ->
-                    val responseBody = response.body?.string().orEmpty()
+                httpClient.newCall(request)
+                    .execute()
+                    .use { response ->
 
-                    if (!response.isSuccessful) {
-                        val errorMessage = runCatching {
-                            JSONObject(responseBody)
-                                .getJSONObject("error")
-                                .getString("message")
-                        }.getOrDefault(responseBody)
+                        val responseBody =
+                            response.body?.string().orEmpty()
 
-                        error("HTTP ${response.code}: $errorMessage")
-                    }
+                        if (!response.isSuccessful) {
 
-                    val json = JSONObject(responseBody)
-                    val candidates = json.optJSONArray("candidates")
-                        ?: error("Gemini tidak memberikan kandidat jawaban.")
+                            val errorMessage = runCatching {
+                                JSONObject(responseBody)
+                                    .getJSONObject("error")
+                                    .getString("message")
+                            }.getOrDefault(responseBody)
 
-                    if (candidates.length() == 0) {
-                        error("Gemini tidak menghasilkan jawaban.")
-                    }
-
-                    val parts = candidates
-                        .getJSONObject(0)
-                        .getJSONObject("content")
-                        .getJSONArray("parts")
-
-                    val answer = buildString {
-                        for (i in 0 until parts.length()) {
-                            append(
-                                parts.getJSONObject(i)
-                                    .optString("text", "")
+                            error(
+                                "HTTP ${response.code}: $errorMessage"
                             )
                         }
-                    }.trim()
 
-                    if (answer.isEmpty()) {
-                        error("Jawaban Gemini kosong.")
+                        val json = JSONObject(responseBody)
+
+                        val candidates =
+                            json.optJSONArray("candidates")
+                                ?: error(
+                                    "Gemini tidak memberikan kandidat jawaban."
+                                )
+
+                        if (candidates.length() == 0) {
+                            error(
+                                "Gemini tidak menghasilkan jawaban."
+                            )
+                        }
+
+                        val parts = candidates
+                            .getJSONObject(0)
+                            .getJSONObject("content")
+                            .getJSONArray("parts")
+
+                        val answer = buildString {
+                            for (i in 0 until parts.length()) {
+                                append(
+                                    parts.getJSONObject(i)
+                                        .optString("text", "")
+                                )
+                            }
+                        }.trim()
+
+                        if (answer.isEmpty()) {
+                            error("Jawaban Gemini kosong.")
+                        }
+
+                        answer
                     }
-
-                    answer
-                }
             }
 
             runOnUiThread {
+
                 outcome.fold(
+
                     onSuccess = { answer ->
+
                         result.text = answer
-                        engineStatus.text = "GEMINI 3 FLASH: TERHUBUNG"
+
+                        engineStatus.text =
+                            "GEMINI 3 FLASH: TERHUBUNG"
 
                         if (Settings.canDrawOverlays(this)) {
+
                             startService(
                                 Intent(
                                     this,
@@ -477,47 +631,29 @@ class MainActivity : AppCompatActivity() {
                             )
                         }
                     },
+
                     onFailure = { error ->
+
                         result.text =
                             "Analisis gagal: ${error.localizedMessage}"
-                        engineStatus.text = "GEMINI 3 FLASH: ERROR"
+
+                        engineStatus.text =
+                            "GEMINI 3 FLASH: ERROR"
                     }
                 )
             }
         }
     }
 
-    private fun showFloatingResult() {
-        if (!Settings.canDrawOverlays(this)) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
-            )
-
-            startActivity(intent)
-
-            Toast.makeText(
-                this,
-                "Izinkan tampil di atas aplikasi lain.",
-                Toast.LENGTH_LONG
-            ).show()
-
-            return
-        }
-
-        startService(
-            Intent(this, FloatingResultService::class.java)
-                .putExtra("result", result.text.toString())
-        )
-    }
-
     override fun onDestroy() {
+
         try {
             unregisterReceiver(screenTextReceiver)
         } catch (_: Exception) {
         }
 
         ioExecutor.shutdown()
+
         super.onDestroy()
     }
 }
