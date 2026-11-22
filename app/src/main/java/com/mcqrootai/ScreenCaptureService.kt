@@ -29,13 +29,20 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 class ScreenCaptureService : Service() {
 
     companion object {
-        const val ACTION_STOP = "com.mcqrootai.ACTION_STOP_CAPTURE"
-        const val ACTION_CAPTURE = "com.mcqrootai.ACTION_CAPTURE_ONCE"
-        const val ACTION_TEXT_DETECTED = "com.mcqrootai.TEXT_DETECTED"
+        const val ACTION_STOP =
+            "com.mcqrootai.ACTION_STOP_CAPTURE"
+
+        const val ACTION_CAPTURE =
+            "com.mcqrootai.ACTION_CAPTURE_ONCE"
+
+        const val ACTION_TEXT_DETECTED =
+            "com.mcqrootai.TEXT_DETECTED"
+
         const val EXTRA_TEXT = "detected_text"
 
         private const val CHANNEL_ID = "screen_capture"
         private const val NOTIFICATION_ID = 1001
+        private const val CAPTURE_TIMEOUT = 7000L
     }
 
     private var projection: MediaProjection? = null
@@ -48,7 +55,18 @@ class ScreenCaptureService : Service() {
     private var processing = false
 
     private val recognizer by lazy {
-        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        TextRecognition.getClient(
+            TextRecognizerOptions.DEFAULT_OPTIONS
+        )
+    }
+
+    private val captureTimeoutRunnable = Runnable {
+        if (captureRequested) {
+            captureRequested = false
+            sendText(
+                "Pengambilan layar timeout. Silakan coba lagi."
+            )
+        }
     }
 
     private val imageListener =
@@ -59,11 +77,22 @@ class ScreenCaptureService : Service() {
                 return@OnImageAvailableListener
             }
 
-            val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
+            val image = reader.acquireLatestImage()
+                ?: return@OnImageAvailableListener
+
+            handler.removeCallbacks(captureTimeoutRunnable)
 
             captureRequested = false
             processing = true
+
             processFrame(image)
+        }
+
+    private val projectionCallback =
+        object : MediaProjection.Callback() {
+            override fun onStop() {
+                finishCapture(false)
+            }
         }
 
     override fun onCreate() {
@@ -78,58 +107,106 @@ class ScreenCaptureService : Service() {
     ): Int {
 
         when (intent?.action) {
+
             ACTION_STOP -> {
                 stopCapture()
                 return START_NOT_STICKY
             }
 
             ACTION_CAPTURE -> {
-                if (projection != null && !processing) {
-                    captureRequested = true
-                } else if (processing) {
-                    sendText("Sedang memproses gambar. Tunggu sebentar.")
-                } else {
-                    sendText("Screen Assistant belum aktif. Aktifkan terlebih dahulu.")
+
+                if (projection == null) {
+                    sendText(
+                        "Screen Assistant belum aktif. " +
+                        "Aktifkan terlebih dahulu."
+                    )
+
+                    stopSelf(startId)
+                    return START_NOT_STICKY
                 }
+
+                if (processing || captureRequested) {
+                    sendText(
+                        "Sedang memproses gambar. Tunggu sebentar."
+                    )
+                    return START_NOT_STICKY
+                }
+
+                captureRequested = true
+
+                handler.removeCallbacks(
+                    captureTimeoutRunnable
+                )
+
+                handler.postDelayed(
+                    captureTimeoutRunnable,
+                    CAPTURE_TIMEOUT
+                )
+
                 return START_NOT_STICKY
             }
         }
 
-        if (projection != null) return START_NOT_STICKY
+        if (projection != null) {
+            return START_NOT_STICKY
+        }
 
         val notification = createNotification()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification
+                )
+            }
+
+        } catch (error: Exception) {
+            sendText(
+                "Gagal menjalankan foreground service: " +
+                error.localizedMessage
             )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
 
-        val resultCode = intent?.getIntExtra("resultCode", 0) ?: 0
+        val resultCode =
+            intent?.getIntExtra("resultCode", 0) ?: 0
 
         val projectionData: Intent? =
             if (Build.VERSION.SDK_INT >= 33) {
-                intent?.getParcelableExtra("projectionData", Intent::class.java)
+                intent?.getParcelableExtra(
+                    "projectionData",
+                    Intent::class.java
+                )
             } else {
                 @Suppress("DEPRECATION")
                 intent?.getParcelableExtra("projectionData")
             }
 
         if (resultCode == 0 || projectionData == null) {
-            sendText("Izin screen capture tidak tersedia.")
+            sendText(
+                "Izin screen capture tidak tersedia."
+            )
             stopCapture()
             return START_NOT_STICKY
         }
 
         try {
-            val manager = getSystemService(MEDIA_PROJECTION_SERVICE)
-                as MediaProjectionManager
+            val manager =
+                getSystemService(MEDIA_PROJECTION_SERVICE)
+                    as MediaProjectionManager
 
-            projection = manager.getMediaProjection(resultCode, projectionData)
+            projection = manager.getMediaProjection(
+                resultCode,
+                projectionData
+            )
 
             val metrics = android.util.DisplayMetrics()
 
@@ -146,14 +223,13 @@ class ScreenCaptureService : Service() {
 
             imageReader = reader
 
-            reader.setOnImageAvailableListener(imageListener, handler)
+            reader.setOnImageAvailableListener(
+                imageListener,
+                handler
+            )
 
             projection?.registerCallback(
-                object : MediaProjection.Callback() {
-                    override fun onStop() {
-                        finishCapture(false)
-                    }
-                },
+                projectionCallback,
                 handler
             )
 
@@ -169,12 +245,17 @@ class ScreenCaptureService : Service() {
             )
 
             if (virtualDisplay == null) {
-                sendText("Gagal membuat virtual display.")
+                sendText(
+                    "Gagal membuat virtual display."
+                )
                 stopCapture()
+                return START_NOT_STICKY
             }
 
         } catch (error: Exception) {
-            sendText("Screen capture gagal: ${error.localizedMessage}")
+            sendText(
+                "Screen capture gagal: ${error.localizedMessage}"
+            )
             stopCapture()
         }
 
@@ -187,10 +268,15 @@ class ScreenCaptureService : Service() {
         try {
             val plane = image.planes[0]
             val buffer = plane.buffer
+
             val pixelStride = plane.pixelStride
             val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * image.width
-            val paddedWidth = image.width + rowPadding / pixelStride
+
+            val rowPadding =
+                rowStride - pixelStride * image.width
+
+            val paddedWidth =
+                image.width + rowPadding / pixelStride
 
             val paddedBitmap = Bitmap.createBitmap(
                 paddedWidth,
@@ -212,7 +298,11 @@ class ScreenCaptureService : Service() {
             paddedBitmap.recycle()
 
         } catch (error: Exception) {
-            sendText("Gagal membaca frame: ${error.localizedMessage}")
+
+            sendText(
+                "Gagal membaca frame: ${error.localizedMessage}"
+            )
+
         } finally {
             image.close()
         }
@@ -225,41 +315,67 @@ class ScreenCaptureService : Service() {
         }
 
         try {
-            recognizer.process(InputImage.fromBitmap(capturedBitmap, 0))
+            recognizer.process(
+                InputImage.fromBitmap(capturedBitmap, 0)
+            )
                 .addOnSuccessListener { visionText ->
+
                     val text = visionText.text.trim()
 
                     sendText(
-                        if (text.isNotEmpty()) text
-                        else "Tidak ada teks yang terbaca di layar."
+                        if (text.isNotEmpty()) {
+                            text
+                        } else {
+                            "Tidak ada teks yang terbaca di layar."
+                        }
                     )
                 }
                 .addOnFailureListener { error ->
-                    sendText("OCR gagal: ${error.localizedMessage}")
+
+                    sendText(
+                        "OCR gagal: ${error.localizedMessage}"
+                    )
                 }
                 .addOnCompleteListener {
-                    capturedBitmap.recycle()
+
+                    if (!capturedBitmap.isRecycled) {
+                        capturedBitmap.recycle()
+                    }
+
                     processing = false
                 }
 
         } catch (error: Exception) {
-            capturedBitmap.recycle()
+
+            if (!capturedBitmap.isRecycled) {
+                capturedBitmap.recycle()
+            }
+
             processing = false
-            sendText("OCR gagal: ${error.localizedMessage}")
+
+            sendText(
+                "OCR gagal: ${error.localizedMessage}"
+            )
         }
     }
 
     private fun sendText(text: String) {
-        sendBroadcast(
-            Intent(ACTION_TEXT_DETECTED).apply {
-                setPackage(packageName)
-                putExtra(EXTRA_TEXT, text)
-            }
-        )
+        val broadcast = Intent(
+            ACTION_TEXT_DETECTED
+        ).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_TEXT, text)
+        }
+
+        sendBroadcast(broadcast)
     }
 
     private fun createNotification(): Notification {
-        val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+
+        val stopIntent = Intent(
+            this,
+            ScreenCaptureService::class.java
+        ).apply {
             action = ACTION_STOP
         }
 
@@ -267,12 +383,18 @@ class ScreenCaptureService : Service() {
             this,
             100,
             stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(
+            this,
+            CHANNEL_ID
+        )
             .setContentTitle("MCQ Root AI")
-            .setContentText("Screen Assistant aktif. Capture saat diminta.")
+            .setContentText(
+                "Screen Assistant aktif. Capture saat diminta."
+            )
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .addAction(
@@ -288,26 +410,55 @@ class ScreenCaptureService : Service() {
     }
 
     private fun finishCapture(stopProjection: Boolean) {
+
+        handler.removeCallbacks(captureTimeoutRunnable)
+
         captureRequested = false
+        processing = false
 
         val activeProjection = projection
         projection = null
 
-        virtualDisplay?.release()
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {
+        }
+
         virtualDisplay = null
 
-        imageReader?.setOnImageAvailableListener(null, null)
-        imageReader?.close()
+        try {
+            imageReader?.setOnImageAvailableListener(
+                null,
+                null
+            )
+            imageReader?.close()
+        } catch (_: Exception) {
+        }
+
         imageReader = null
 
-        if (stopProjection) activeProjection?.stop()
+        try {
+            activeProjection?.unregisterCallback(
+                projectionCallback
+            )
+        } catch (_: Exception) {
+        }
+
+        if (stopProjection) {
+            try {
+                activeProjection?.stop()
+            } catch (_: Exception) {
+            }
+        }
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     private fun createNotificationChannel() {
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "MCQ Root AI Screen Capture",
@@ -320,21 +471,50 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
+
         handler.removeCallbacksAndMessages(null)
 
-        virtualDisplay?.release()
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {
+        }
+
         virtualDisplay = null
 
-        imageReader?.setOnImageAvailableListener(null, null)
-        imageReader?.close()
+        try {
+            imageReader?.setOnImageAvailableListener(
+                null,
+                null
+            )
+            imageReader?.close()
+        } catch (_: Exception) {
+        }
+
         imageReader = null
 
-        projection?.stop()
+        try {
+            projection?.unregisterCallback(
+                projectionCallback
+            )
+            projection?.stop()
+        } catch (_: Exception) {
+        }
+
         projection = null
 
-        recognizer.close()
+        if (processing) {
+            processing = false
+        }
+
+        try {
+            recognizer.close()
+        } catch (_: Exception) {
+        }
+
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
+    }
 }
