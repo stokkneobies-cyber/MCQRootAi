@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
@@ -44,7 +45,7 @@ class ScreenCaptureService : Service() {
         val notification: Notification =
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("MCQ Root AI")
-                .setContentText("Sesi Screen Capture aktif.")
+                .setContentText("Sesi capture aktif.")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setOngoing(true)
                 .build()
@@ -59,9 +60,10 @@ class ScreenCaptureService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        val resultCode = intent?.getIntExtra("resultCode", 0) ?: 0
+        val resultCode =
+            intent?.getIntExtra("resultCode", 0) ?: 0
 
-        val projectionData =
+        val projectionData: Intent? =
             if (Build.VERSION.SDK_INT >= 33) {
                 intent?.getParcelableExtra(
                     "projectionData",
@@ -69,33 +71,34 @@ class ScreenCaptureService : Service() {
                 )
             } else {
                 @Suppress("DEPRECATION")
-                intent?.getParcelableExtra<Intent>("projectionData")
+                intent?.getParcelableExtra("projectionData")
             }
 
-        if (resultCode != 0 && projectionData != null) {
-            try {
-                val manager =
-                    getSystemService(MEDIA_PROJECTION_SERVICE)
-                        as MediaProjectionManager
+        if (resultCode == 0 || projectionData == null) {
+            stopCapture()
+            return START_NOT_STICKY
+        }
 
-                projection = manager.getMediaProjection(
-                    resultCode,
-                    projectionData
-                )
+        try {
+            val manager =
+                getSystemService(MEDIA_PROJECTION_SERVICE)
+                    as MediaProjectionManager
 
-                projection?.registerCallback(
-                    object : MediaProjection.Callback() {
-                        override fun onStop() {
-                            stopCapture()
-                        }
-                    },
-                    android.os.Handler(mainLooper)
-                )
+            projection = manager.getMediaProjection(
+                resultCode,
+                projectionData
+            )
 
-            } catch (error: Exception) {
-                stopCapture()
-            }
-        } else {
+            projection?.registerCallback(
+                object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        stopCapture()
+                    }
+                },
+                Handler(mainLooper)
+            )
+
+        } catch (error: Exception) {
             stopCapture()
         }
 
@@ -103,8 +106,10 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCapture() {
-        projection?.stop()
+        val activeProjection = projection
         projection = null
+
+        activeProjection?.stop()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -131,4 +136,3 @@ class ScreenCaptureService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
-
