@@ -6,32 +6,49 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import android.media.projection.MediaProjectionManager
-import java.io.File
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var question: EditText
     private lateinit var result: TextView
     private lateinit var engineStatus: TextView
-    private lateinit var localAI: LocalAIEngine
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
 
     private val imagePicker = 4102
-    private val modelPicker = 4103
     private val screenCaptureRequest = 4104
 
-    private var modelReady = false
+    private val preferences by lazy {
+        getSharedPreferences("mcq_settings", MODE_PRIVATE)
+    }
+
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val modelName = "gemini-3-flash-preview"
 
     private val projectionManager by lazy {
         getSystemService(MEDIA_PROJECTION_SERVICE)
@@ -46,12 +63,13 @@ class MainActivity : AppCompatActivity() {
         result = findViewById(R.id.result)
         engineStatus = findViewById(R.id.engineStatus)
 
-        localAI = LocalAIEngine(this)
+        engineStatus.text = "AI: GEMINI 3 FLASH"
 
-        checkRootAccess()
-
-        findViewById<Button>(R.id.loadModel).setOnClickListener {
-            selectModel()
+        findViewById<Button>(R.id.loadModel).apply {
+            text = "ATUR GEMINI API KEY"
+            setOnClickListener {
+                showApiKeyDialog(null)
+            }
         }
 
         findViewById<Button>(R.id.pickImage).setOnClickListener {
@@ -71,41 +89,50 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun checkRootAccess() {
-        engineStatus.text = "KERNELSU: MEMERIKSA..."
+    private fun showApiKeyDialog(
+        textToAnalyze: String?
+    ) {
+        val keyInput = EditText(this).apply {
+            hint = "Masukkan Gemini API key"
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(preferences.getString("gemini_api_key", ""))
+        }
 
-        ioExecutor.execute {
-            val hasRoot = try {
-                val process = ProcessBuilder(
-                    "su", "-c", "id"
-                ).redirectErrorStream(true).start()
+        AlertDialog.Builder(this)
+            .setTitle("Gemini 3 Flash API")
+            .setMessage("Masukkan API key Gemini milikmu.")
+            .setView(keyInput)
+            .setNegativeButton("Batal", null)
+            .setPositiveButton("Simpan") { _, _ ->
+                val key = keyInput.text.toString().trim()
 
-                val output = process.inputStream
-                    .bufferedReader().use { it.readText() }
+                if (key.isEmpty()) {
+                    Toast.makeText(
+                        this,
+                        "API key belum diisi.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setPositiveButton
+                }
 
-                process.waitFor() == 0 && output.contains("uid=0")
-            } catch (e: Exception) {
-                false
-            }
+                preferences.edit()
+                    .putString("gemini_api_key", key)
+                    .apply()
 
-            runOnUiThread {
-                engineStatus.text = if (hasRoot) {
-                    "KERNELSU: ROOT TERSEDIA | AI: BELUM DIMUAT"
-                } else {
-                    "KERNELSU: ROOT TIDAK TERSEDIA | AI: BELUM DIMUAT"
+                engineStatus.text = "GEMINI 3 FLASH: API KEY TERSIMPAN"
+
+                Toast.makeText(
+                    this,
+                    "API key tersimpan di perangkat.",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                if (!textToAnalyze.isNullOrBlank()) {
+                    analyzeText(textToAnalyze)
                 }
             }
-        }
-    }
-
-    private fun selectModel() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            type = "*/*"
-            addCategory(Intent.CATEGORY_OPENABLE)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-
-        startActivityForResult(intent, modelPicker)
+            .show()
     }
 
     private fun selectImage() {
@@ -135,12 +162,6 @@ class MainActivity : AppCompatActivity() {
             imagePicker -> {
                 if (resultCode == Activity.RESULT_OK) {
                     data?.data?.let { processImage(it) }
-                }
-            }
-
-            modelPicker -> {
-                if (resultCode == Activity.RESULT_OK) {
-                    data?.data?.let { copyAndLoadModel(it) }
                 }
             }
 
@@ -195,82 +216,25 @@ class MainActivity : AppCompatActivity() {
 
                     question.setText(extractedText)
 
-                    if (!modelReady) {
-                        result.text =
-                            "OCR berhasil. Muat model Gemma untuk analisis."
-                        return@addOnSuccessListener
-                    }
+                    val key = preferences.getString(
+                        "gemini_api_key", ""
+                    )
 
-                    analyzeText(extractedText)
+                    if (key.isNullOrBlank()) {
+                        result.text =
+                            "OCR berhasil. Masukkan Gemini API key untuk analisis."
+                        showApiKeyDialog(extractedText)
+                    } else {
+                        analyzeText(extractedText)
+                    }
                 }
                 .addOnFailureListener { error ->
                     result.text = "OCR gagal: ${error.localizedMessage}"
                 }
 
         } catch (e: Exception) {
-            result.text = "Gagal membuka gambar: ${e.localizedMessage}"
-        }
-    }
-
-    private fun copyAndLoadModel(uri: Uri) {
-        engineStatus.text = "AI: MENYALIN FILE MODEL..."
-
-        ioExecutor.execute {
-            val modelFile = File(filesDir, "gemma3-1b.litertlm")
-
-            val copyResult = runCatching {
-                contentResolver.openInputStream(uri).use { input ->
-                    requireNotNull(input) {
-                        "Tidak dapat membaca file model."
-                    }
-
-                    modelFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-
-                require(modelFile.length() > 0) {
-                    "File model kosong."
-                }
-
-                modelFile
-            }
-
-            runOnUiThread {
-                copyResult.fold(
-                    onSuccess = { file ->
-                        engineStatus.text = "AI: MEMUAT MODEL..."
-
-                        localAI.loadModel(file) { loadResult ->
-                            loadResult.fold(
-                                onSuccess = {
-                                    modelReady = true
-                                    engineStatus.text =
-                                        "AI LOKAL: GEMMA 3 1B SIAP"
-
-                                    Toast.makeText(
-                                        this,
-                                        "Model berhasil dimuat.",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                },
-                                onFailure = { error ->
-                                    modelReady = false
-                                    engineStatus.text =
-                                        "AI: GAGAL MEMUAT MODEL"
-                                    result.text =
-                                        "Gagal memuat model: ${error.localizedMessage}"
-                                }
-                            )
-                        }
-                    },
-                    onFailure = { error ->
-                        engineStatus.text = "AI: GAGAL MENYALIN MODEL"
-                        result.text =
-                            "Gagal menyalin file: ${error.localizedMessage}"
-                    }
-                )
-            }
+            result.text =
+                "Gagal membuka gambar: ${e.localizedMessage}"
         }
     }
 
@@ -282,12 +246,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (!modelReady) {
-            Toast.makeText(
-                this,
-                "Muat model AI terlebih dahulu.",
-                Toast.LENGTH_LONG
-            ).show()
+        val key = preferences.getString("gemini_api_key", "")
+
+        if (key.isNullOrBlank()) {
+            showApiKeyDialog(promptText)
             return
         }
 
@@ -295,18 +257,121 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun analyzeText(text: String) {
-        result.text = "Gemma sedang menganalisis..."
+        val apiKey = preferences.getString(
+            "gemini_api_key", ""
+        )?.trim().orEmpty()
 
-        localAI.analyze(text) { response ->
-            response.fold(
-                onSuccess = { answer ->
-                    result.text = answer
-                },
-                onFailure = { error ->
-                    result.text =
-                        "Analisis gagal: ${error.localizedMessage}"
+        if (apiKey.isEmpty()) {
+            showApiKeyDialog(text)
+            return
+        }
+
+        result.text = "Gemini 3 Flash sedang menganalisis..."
+
+        ioExecutor.execute {
+            val outcome = runCatching {
+                val prompt = """
+                    Kamu adalah MCQ Root AI, asisten belajar
+                    yang membantu memahami soal pilihan ganda.
+
+                    Analisis soal latihan berikut:
+
+                    $text
+
+                    Berikan jawaban dalam bahasa Indonesia:
+                    1. Pilihan jawaban yang paling tepat.
+                    2. Alasan jawaban tersebut benar.
+                    3. Penjelasan singkat mengapa pilihan lain kurang tepat.
+
+                    Jika informasi soal tidak cukup, katakan dengan jujur.
+                """.trimIndent()
+
+                val requestJson = JSONObject()
+                    .put(
+                        "contents",
+                        org.json.JSONArray().put(
+                            JSONObject().put(
+                                "parts",
+                                org.json.JSONArray().put(
+                                    JSONObject().put("text", prompt)
+                                )
+                            )
+                        )
+                    )
+
+                val body = requestJson.toString()
+                    .toRequestBody(
+                        "application/json; charset=utf-8".toMediaType()
+                    )
+
+                val request = Request.Builder()
+                    .url(
+                        "https://generativelanguage.googleapis.com/" +
+                            "v1beta/models/$modelName:generateContent"
+                    )
+                    .addHeader("x-goog-api-key", apiKey)
+                    .addHeader("Content-Type", "application/json")
+                    .post(body)
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+
+                    if (!response.isSuccessful) {
+                        val errorMessage = runCatching {
+                            JSONObject(responseBody)
+                                .getJSONObject("error")
+                                .getString("message")
+                        }.getOrDefault(responseBody)
+
+                        error(
+                            "HTTP ${response.code}: $errorMessage"
+                        )
+                    }
+
+                    val json = JSONObject(responseBody)
+                    val candidates = json.optJSONArray("candidates")
+                        ?: error("Gemini tidak memberikan kandidat jawaban.")
+
+                    if (candidates.length() == 0) {
+                        error("Gemini tidak menghasilkan jawaban.")
+                    }
+
+                    val parts = candidates
+                        .getJSONObject(0)
+                        .getJSONObject("content")
+                        .getJSONArray("parts")
+
+                    val answer = buildString {
+                        for (i in 0 until parts.length()) {
+                            append(
+                                parts.getJSONObject(i)
+                                    .optString("text", "")
+                            )
+                        }
+                    }.trim()
+
+                    if (answer.isEmpty()) {
+                        error("Jawaban Gemini kosong.")
+                    }
+
+                    answer
                 }
-            )
+            }
+
+            runOnUiThread {
+                outcome.fold(
+                    onSuccess = { answer ->
+                        result.text = answer
+                        engineStatus.text = "GEMINI 3 FLASH: TERHUBUNG"
+                    },
+                    onFailure = { error ->
+                        result.text =
+                            "Analisis gagal: ${error.localizedMessage}"
+                        engineStatus.text = "GEMINI 3 FLASH: ERROR"
+                    }
+                )
+            }
         }
     }
 
@@ -335,7 +400,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        localAI.close()
         ioExecutor.shutdown()
         super.onDestroy()
     }
