@@ -1,4 +1,3 @@
-
 package com.mcqrootai
 
 import android.app.Service
@@ -27,11 +26,11 @@ class FloatingResultService : Service() {
         startId: Int
     ): Int {
 
-        val text = intent?.getStringExtra(EXTRA_RESULT)
+        val resultText = intent?.getStringExtra(EXTRA_RESULT)
             ?: "Belum ada hasil."
 
         if (view != null) {
-            view?.text = text
+            view?.text = resultText
             return START_NOT_STICKY
         }
 
@@ -39,7 +38,7 @@ class FloatingResultService : Service() {
             getSystemService(WINDOW_SERVICE) as WindowManager
 
         val label = TextView(this).apply {
-            text = text
+            this.text = resultText
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 14f
             setPadding(24, 20, 24, 20)
